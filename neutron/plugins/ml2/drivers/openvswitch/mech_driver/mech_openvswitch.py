@@ -133,7 +133,8 @@ class OpenvswitchMechanismDriver(mech_agent.SimpleAgentMechanismDriverBase):
                 in [a_const.OVS_DPDK_VHOST_USER,
                     a_const.OVS_DPDK_VHOST_USER_CLIENT]) and
                 agent['configurations'].get('datapath_type') ==
-                a_const.OVS_DATAPATH_NETDEV):
+                a_const.OVS_DATAPATH_NETDEV and
+                cfg.CONF.OVS_DRIVER.vhost_user_enabled):
             return portbindings.VIF_TYPE_VHOST_USER
         return self.vif_type
 

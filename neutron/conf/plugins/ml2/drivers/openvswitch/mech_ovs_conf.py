@@ -33,6 +33,8 @@ ovs_driver_opts = [
                        "This allows to  support hardware offload via tc and "
                        "that allows us to manage the VF by OpenFlow control "
                        "plane using representor net-device.")),
+    cfg.BoolOpt('vhost_user_enabled', default=True,
+               help=_('Enable vhost-user backed virtio devices')),
 ]
 
 
