@@ -12,6 +12,7 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+
 import abc
 import itertools
 import operator
@@ -27,13 +28,16 @@ from neutron_lib.plugins import utils as plugin_utils
 from oslo_config import cfg
 from oslo_db import exception as db_exc
 from oslo_log import log
+from oslo_utils import uuidutils
 import six
 from six import moves
 from sqlalchemy import or_
 
 from neutron._i18n import _
+from neutron.db.models import network_segment_range as range_model
 from neutron.objects import base as base_obj
 from neutron.plugins.ml2.drivers import helpers
+from neutron.services.network_segment_range import plugin as range_plugin
 
 LOG = log.getLogger(__name__)
 
@@ -137,15 +141,64 @@ class _TunnelTypeDriverBase(helpers.SegmentTypeDriver):
                  {'type': self.get_type(), 'range': current_range})
 
     @db_api.retry_db_errors
+    def _get_tunnel_network_segment_ranges(self, session):
+        """A private function to query all tunnel network segment ranges."""
+        ranges = []
+        with session.begin(subtransactions=True):
+            query = (session.query(range_model.NetworkSegmentRange).
+                     filter(range_model.NetworkSegmentRange.network_type ==
+                            self.get_type()))
+            for entry in query.all():
+                ranges.append((entry['minimum'], entry['maximum']))
+        return ranges
+
+    @db_api.retry_db_errors
+    def _populate_new_default_network_segment_ranges(self):
+        ctx = context.get_admin_context()
+        for tun_min, tun_max in self.tunnel_ranges:
+            res = {
+                'id': uuidutils.generate_uuid(),
+                'name': '',
+                'default': True,
+                'shared': True,
+                'network_type': self.get_type(),
+                'minimum': tun_min,
+                'maximum': tun_max}
+            with ctx.session.begin(subtransactions=True):
+                new_default_ranges = range_model.NetworkSegmentRange(
+                    **res)
+                ctx.session.add(new_default_ranges)
+
+    @db_api.retry_db_errors
+    def _delete_expired_default_network_segment_ranges(self):
+        ctx = context.get_admin_context()
+        with ctx.session.begin(subtransactions=True):
+            old_default_ranges = (ctx.session.query(
+                range_model.NetworkSegmentRange).filter_by(
+                default=True, network_type=self.get_type()))
+            old_default_ranges.delete()
+
+    def initialize_network_segment_range_support(self):
+        self._delete_expired_default_network_segment_ranges()
+        self._populate_new_default_network_segment_ranges()
+
+    def update_network_segment_range_allocations(self):
+        self.sync_allocations()
+
+    @db_api.retry_db_errors
     def sync_allocations(self):
+        ctx = context.get_admin_context()
         # determine current configured allocatable tunnel ids
         tunnel_ids = set()
-        for tun_min, tun_max in self.tunnel_ranges:
+        ranges = (self._get_tunnel_network_segment_ranges(ctx.session)
+                  if range_plugin.is_network_segment_range_enabled() else
+                  self.tunnel_ranges)
+        for tun_min, tun_max in ranges:
             tunnel_ids |= set(moves.range(tun_min, tun_max + 1))
 
         tunnel_id_getter = operator.attrgetter(self.segmentation_key)
         tunnel_col = getattr(self.model, self.segmentation_key)
-        ctx = context.get_admin_context()
+
         with db_api.CONTEXT_WRITER.using(ctx):
             # remove from table unallocated tunnels not currently allocatable
             # fetch results as list via all() because we'll be iterating
@@ -173,7 +226,7 @@ class _TunnelTypeDriverBase(helpers.SegmentTypeDriver):
     def is_partial_segment(self, segment):
         return segment.get(api.SEGMENTATION_ID) is None
 
-    def validate_provider_segment(self, segment):
+    def validate_provider_segment(self, segment, context=None):
         physical_network = segment.get(api.PHYSICAL_NETWORK)
         if physical_network:
             msg = _("provider:physical_network specified for %s "
@@ -213,9 +266,11 @@ class TunnelTypeDriver(_TunnelTypeDriverBase):
     - get_allocation
     """
 
-    def reserve_provider_segment(self, session, segment):
+    def reserve_provider_segment(self, session, segment, filters=None):
         if self.is_partial_segment(segment):
-            alloc = self.allocate_partially_specified_segment(session)
+            filters = filters or {}
+            alloc = self.allocate_partially_specified_segment(session,
+                                                              **filters)
             if not alloc:
                 raise exc.NoNetworkAvailable()
         else:
@@ -229,8 +284,9 @@ class TunnelTypeDriver(_TunnelTypeDriverBase):
                 api.SEGMENTATION_ID: getattr(alloc, self.segmentation_key),
                 api.MTU: self.get_mtu()}
 
-    def allocate_tenant_segment(self, session):
-        alloc = self.allocate_partially_specified_segment(session)
+    def allocate_tenant_segment(self, session, filters=None):
+        filters = filters or {}
+        alloc = self.allocate_partially_specified_segment(session, **filters)
         if not alloc:
             return
         return {api.NETWORK_TYPE: self.get_type(),
@@ -241,7 +297,10 @@ class TunnelTypeDriver(_TunnelTypeDriverBase):
     def release_segment(self, session, segment):
         tunnel_id = segment[api.SEGMENTATION_ID]
 
-        inside = any(lo <= tunnel_id <= hi for lo, hi in self.tunnel_ranges)
+        ranges = (self._get_tunnel_network_segment_ranges(context.session)
+                  if range_plugin.is_network_segment_range_enabled() else
+                  self.tunnel_ranges)
+        inside = any(lo <= tunnel_id <= hi for lo, hi in ranges)
 
         info = {'type': self.get_type(), 'id': tunnel_id}
         with session.begin(subtransactions=True):
@@ -281,9 +340,11 @@ class ML2TunnelTypeDriver(_TunnelTypeDriverBase):
     - get_allocation
     """
 
-    def reserve_provider_segment(self, context, segment):
+    def reserve_provider_segment(self, context, segment, filters=None):
         if self.is_partial_segment(segment):
-            alloc = self.allocate_partially_specified_segment(context)
+            filters = filters or {}
+            alloc = self.allocate_partially_specified_segment(context,
+                                                              **filters)
             if not alloc:
                 raise exc.NoNetworkAvailable()
         else:
@@ -297,8 +358,9 @@ class ML2TunnelTypeDriver(_TunnelTypeDriverBase):
                 api.SEGMENTATION_ID: getattr(alloc, self.segmentation_key),
                 api.MTU: self.get_mtu()}
 
-    def allocate_tenant_segment(self, context):
-        alloc = self.allocate_partially_specified_segment(context)
+    def allocate_tenant_segment(self, context, filters=None):
+        filters = filters or {}
+        alloc = self.allocate_partially_specified_segment(context, **filters)
         if not alloc:
             return
         return {api.NETWORK_TYPE: self.get_type(),
@@ -309,7 +371,10 @@ class ML2TunnelTypeDriver(_TunnelTypeDriverBase):
     def release_segment(self, context, segment):
         tunnel_id = segment[api.SEGMENTATION_ID]
 
-        inside = any(lo <= tunnel_id <= hi for lo, hi in self.tunnel_ranges)
+        ranges = (self._get_tunnel_network_segment_ranges(context.session)
+                  if range_plugin.is_network_segment_range_enabled() else
+                  self.tunnel_ranges)
+        inside = any(lo <= tunnel_id <= hi for lo, hi in ranges)
 
         info = {'type': self.get_type(), 'id': tunnel_id}
         with db_api.CONTEXT_WRITER.using(context):

@@ -2458,8 +2458,10 @@ class TestMultiSegmentNetworks(Ml2PluginV2TestCase):
         segment = {pnet.NETWORK_TYPE: None,
                    pnet.PHYSICAL_NETWORK: 'phys_net',
                    pnet.SEGMENTATION_ID: None}
+        mock_context = mock.Mock()
         with testtools.ExpectedException(exc.InvalidInput):
-            self.driver.type_manager._process_provider_create(segment)
+            self.driver.type_manager._process_provider_create(
+                mock_context, segment)
 
     def test_create_network_plugin(self):
         data = {'network': {'name': 'net1',

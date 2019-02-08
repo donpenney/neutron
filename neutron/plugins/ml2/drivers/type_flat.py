@@ -63,10 +63,16 @@ class FlatTypeDriver(helpers.BaseTypeDriver):
     def initialize(self):
         LOG.info("ML2 FlatTypeDriver initialization complete")
 
+    def initialize_network_segment_range_support(self):
+        pass
+
+    def update_network_segment_range_allocations(self):
+        pass
+
     def is_partial_segment(self, segment):
         return False
 
-    def validate_provider_segment(self, segment):
+    def validate_provider_segment(self, segment, context=None):
         physical_network = segment.get(api.PHYSICAL_NETWORK)
         if not physical_network:
             msg = _("physical_network required for flat provider network")
@@ -85,7 +91,7 @@ class FlatTypeDriver(helpers.BaseTypeDriver):
                 msg = _("%s prohibited for flat provider network") % key
                 raise exc.InvalidInput(error_message=msg)
 
-    def reserve_provider_segment(self, context, segment):
+    def reserve_provider_segment(self, context, segment, filters=None):
         physical_network = segment[api.PHYSICAL_NETWORK]
         try:
             LOG.debug("Reserving flat network on physical "
@@ -100,7 +106,7 @@ class FlatTypeDriver(helpers.BaseTypeDriver):
         segment[api.MTU] = self.get_mtu(alloc.physical_network)
         return segment
 
-    def allocate_tenant_segment(self, context):
+    def allocate_tenant_segment(self, context, filters=None):
         # Tenant flat networks are not supported.
         return
 
