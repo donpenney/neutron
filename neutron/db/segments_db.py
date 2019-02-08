@@ -122,3 +122,55 @@ def delete_network_segment(context, segment_id):
     """Release a dynamic segment for the params provided if one exists."""
     with db_api.CONTEXT_WRITER.using(context):
         network_obj.NetworkSegment.delete_objects(context, id=segment_id)
+
+
+def network_segments_exist(context, network_type, physical_network,
+                           segment_range=None):
+    """Check whether one or more network segments exist"""
+    with db_api.CONTEXT_READER.using(context):
+        filters = {
+            'network_type': network_type,
+            'physical_network': physical_network,
+        }
+        segment_objs = network_obj.NetworkSegment.get_objects(
+            context, **filters)
+        if segment_range:
+            minimum_id = segment_range['minimum']
+            maximum_id = segment_range['maximum']
+            segment_objs = [
+                segment for segment in segment_objs if
+                minimum_id <= segment.segmentation_id <= maximum_id]
+        return len(segment_objs) > 0
+
+
+def network_segment_existing_range(context, network_type, physical_network,
+                                   segment_range=None):
+    """Return the range of the existing network segment"""
+    with db_api.CONTEXT_READER.using(context):
+        filters = {
+            'network_type': network_type,
+            'physical_network': physical_network,
+        }
+        pager = base_obj.Pager()
+        # (NOTE) True means ASC, False is DESC
+        pager.sorts = [('segmentation_id', True)]
+        segment_objs = network_obj.NetworkSegment.get_objects(
+            context, _pager=pager, **filters)
+
+        if segment_range:
+            minimum_id = segment_range['minimum']
+            maximum_id = segment_range['maximum']
+            segment_objs = [
+                segment for segment in segment_objs if
+                minimum_id <= segment.segmentation_id <= maximum_id]
+
+        if segment_objs:
+            return (segment_objs[0].segmentation_id,
+                    segment_objs[-1].segmentation_id)
+        else:
+            LOG.debug("No existing segment found for "
+                      "Network type:%(network_type)s, "
+                      "Physical network:%(physical_network)s",
+                      {'network_type': network_type,
+                       'physical_network': physical_network})
+            return None, None
